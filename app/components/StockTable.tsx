@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useStockStore } from "@/app/store/stockStore";
 import { useLanguageStore } from "@/app/store/languageStore";
 import { StockData } from "@/app/types/stock";
+import StockDetailModal from "./StockDetailModal";
 import {
   Table,
   TableBody,
@@ -31,6 +32,16 @@ import {
   Plus,
 } from "lucide-react";
 
+// 货币符号映射
+const currencySymbols: Record<string, string> = {
+  USD: "$",
+  CNY: "¥",
+  JPY: "¥",
+  HKD: "HK$",
+  GBP: "£",
+  EUR: "€",
+};
+
 type SortField = keyof StockData | "score.total" | "valuation.per" | "valuation.pbr" | "valuation.price" | "financial.roe";
 type SortDirection = "asc" | "desc";
 
@@ -45,6 +56,8 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
   const [sortField, setSortField] = useState<SortField>("score.total");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [searchQuery, setSearchQuery] = useState("");
+  const [selectedStock, setSelectedStock] = useState<StockData | null>(null);
+  const [isDetailOpen, setIsDetailOpen] = useState(false);                                                                                                                                                                          
 
   const stocks = propStocks || screenerResult?.stocks || [];
 
@@ -120,18 +133,24 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
     return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
   };
 
-  const formatCurrency = (value: number | null): string => {
+  const formatCurrency = (value: number | null, currency: string = "USD"): string => {
     if (value === null || value === undefined) return "-";
-    if (value >= 1e12) return `$${(value / 1e12).toFixed(2)}T`;
-    if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
-    if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
-    return `$${value.toFixed(2)}`;
+    const symbol = currencySymbols[currency] || "$";
+    if (value >= 1e12) return `${symbol}${(value / 1e12).toFixed(2)}T`;
+    if (value >= 1e9) return `${symbol}${(value / 1e9).toFixed(2)}B`;
+    if (value >= 1e6) return `${symbol}${(value / 1e6).toFixed(2)}M`;
+    return `${symbol}${value.toFixed(2)}`;
   };
 
   const getScoreColor = (score: number): string => {
     if (score >= 80) return "bg-green-500";
     if (score >= 60) return "bg-yellow-500";
     return "bg-red-500";
+  };
+
+  const handleStockClick = (stock: StockData) => {
+    setSelectedStock(stock);
+    setIsDetailOpen(true);
   };
 
   if (isLoading) {
@@ -250,7 +269,11 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
               </TableRow>
             ) : (
               sortedStocks.map((stock) => (
-                <TableRow key={stock.ticker} className="hover:bg-muted/50">
+                <TableRow 
+                  key={stock.ticker} 
+                  className="hover:bg-muted/50 cursor-pointer"
+                  onClick={() => handleStockClick(stock)}
+                >
                   <TableCell>
                     <div className="flex items-center gap-2">
                       <div
@@ -275,7 +298,7 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right font-medium">
-                    ${formatNumber(stock.valuation.price)}
+                    {formatCurrency(stock.valuation.price, stock.currency)}
                   </TableCell>
                   <TableCell className="text-right">
                     {formatNumber(stock.valuation.per)}
@@ -290,10 +313,10 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
                     {formatPercent(stock.valuation.dividendYield)}
                   </TableCell>
                   <TableCell className="text-right">
-                    {formatCurrency(stock.valuation.marketCap)}
+                    {formatCurrency(stock.valuation.marketCap, stock.currency)}
                   </TableCell>
                   {showActions && (
-                    <TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon" className="h-8 w-8">
@@ -301,7 +324,7 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleStockClick(stock)}>
                             <Eye className="h-4 w-4 mr-2" />
                             View Details
                           </DropdownMenuItem>
@@ -323,6 +346,13 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
           </TableBody>
         </Table>
       </div>
+
+      {/* Stock Detail Modal */}
+      <StockDetailModal
+        stock={selectedStock}
+        isOpen={isDetailOpen}
+        onClose={() => setIsDetailOpen(false)}
+      />
     </div>
   );
 }

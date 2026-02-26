@@ -1,16 +1,27 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Noto_Sans, Noto_Sans_JP, Noto_Sans_SC } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// 英文字体 - 通用
+const notoSans = Noto_Sans({
+  variable: "--font-noto-sans",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+// 日文字体
+const notoSansJP = Noto_Sans_JP({
+  variable: "--font-noto-jp",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+});
+
+// 中文字体
+const notoSansSC = Noto_Sans_SC({
+  variable: "--font-noto-sc",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
@@ -26,7 +37,8 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${notoSans.variable} ${notoSansJP.variable} ${notoSansSC.variable} antialiased font-sans`}
+        style={{ fontFamily: 'var(--font-noto-sans), var(--font-noto-sc), var(--font-noto-jp), system-ui, sans-serif' }}
       >
         {children}
         <Toaster />
