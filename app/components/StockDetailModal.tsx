@@ -191,16 +191,18 @@ export default function StockDetailModal({ stock, isOpen, onClose }: StockDetail
                   { label: t('technical') || 'Technical', score: stock.score.technical },
                   { label: 'Alpha', score: stock.score.alpha },
                 ].map((item) => (
-                  <Card key={item.label}>
-                    <CardContent className="p-4 text-center">
-                      <div className={`text-2xl font-bold ${getScoreColor(item.score)}`}>
+                  <Card key={item.label} className="overflow-hidden">
+                    <CardContent className="p-3 text-center">
+                      <div className={`text-xl font-bold ${getScoreColor(item.score)}`}>
                         {item.score}
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1">{item.label}</div>
-                      <Progress 
-                        value={item.score} 
-                        className="h-1.5 mt-2"
-                      />
+                      <div className="text-xs text-muted-foreground mt-1 truncate">{item.label}</div>
+                      <div className="mt-2">
+                        <Progress 
+                          value={item.score} 
+                          className="h-1.5"
+                        />
+                      </div>
                     </CardContent>
                   </Card>
                 ))}
@@ -435,10 +437,10 @@ export default function StockDetailModal({ stock, isOpen, onClose }: StockDetail
                   <CardTitle>{t('technicalIndicators') || 'Technical Indicators'}</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div className="text-center p-4 border rounded-lg">
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="text-center p-4 border rounded-lg min-w-0">
                       <div className="text-sm text-muted-foreground mb-1">RSI (14)</div>
-                      <div className={`text-2xl font-bold ${
+                      <div className={`text-xl font-bold ${
                         stock.technical.rsi14 && stock.technical.rsi14 > 70 ? 'text-red-600' : 
                         stock.technical.rsi14 && stock.technical.rsi14 < 30 ? 'text-green-600' : ''
                       }`}>
@@ -449,23 +451,23 @@ export default function StockDetailModal({ stock, isOpen, onClose }: StockDetail
                          stock.technical.rsi14 && stock.technical.rsi14 < 30 ? 'Oversold' : 'Neutral'}
                       </div>
                     </div>
-                    <div className="text-center p-4 border rounded-lg">
+                    <div className="text-center p-4 border rounded-lg min-w-0">
                       <div className="text-sm text-muted-foreground mb-1">SMA 50</div>
-                      <div className="text-xl font-bold truncate">{symbol}{formatNumber(stock.technical.sma50)}</div>
+                      <div className="text-base font-bold break-all leading-tight">{symbol}{formatNumber(stock.technical.sma50)}</div>
                       <div className="text-xs text-muted-foreground mt-1">
                         {stock.technical.sma50 && stock.valuation.price > stock.technical.sma50 ? 'Above' : 'Below'}
                       </div>
                     </div>
-                    <div className="text-center p-4 border rounded-lg">
+                    <div className="text-center p-4 border rounded-lg min-w-0">
                       <div className="text-sm text-muted-foreground mb-1">SMA 200</div>
-                      <div className="text-xl font-bold truncate">{symbol}{formatNumber(stock.technical.sma200)}</div>
+                      <div className="text-base font-bold break-all leading-tight">{symbol}{formatNumber(stock.technical.sma200)}</div>
                       <div className="text-xs text-muted-foreground mt-1">
                         {stock.technical.sma200 && stock.valuation.price > stock.technical.sma200 ? 'Above' : 'Below'}
                       </div>
                     </div>
-                    <div className="text-center p-4 border rounded-lg">
+                    <div className="text-center p-4 border rounded-lg min-w-0">
                       <div className="text-sm text-muted-foreground mb-1">{t('trend') || 'Trend'}</div>
-                      <div className="text-lg font-bold">
+                      <div className="text-base font-bold">
                         {stock.technical.sma50 && stock.technical.sma200 && stock.technical.sma50 > stock.technical.sma200 ? 
                           <span className="text-green-600 flex items-center justify-center gap-1">
                             <TrendingUp className="h-4 w-4" /> Bull
@@ -483,18 +485,18 @@ export default function StockDetailModal({ stock, isOpen, onClose }: StockDetail
                   <div className="pt-4">
                     <div className="text-sm font-medium mb-3">{t('bollingerBands') || 'Bollinger Bands'}</div>
                     <div className="relative h-16 bg-muted rounded-lg p-4">
-                      <div className="flex justify-between items-center h-full">
-                        <div className="text-center">
+                      <div className="flex justify-between items-center h-full gap-2">
+                        <div className="text-center min-w-0 flex-1">
                           <div className="text-xs text-muted-foreground">Lower</div>
-                          <div className="font-semibold text-sm">{symbol}{formatNumber(stock.technical.bollingerLower)}</div>
+                          <div className="font-semibold text-sm break-all">{symbol}{formatNumber(stock.technical.bollingerLower)}</div>
                         </div>
-                        <div className="text-center">
+                        <div className="text-center min-w-0 flex-1">
                           <div className="text-xs text-muted-foreground">Price</div>
-                          <div className="font-bold text-base text-primary">{symbol}{formatNumber(stock.valuation.price)}</div>
+                          <div className="font-bold text-sm text-primary break-all">{symbol}{formatNumber(stock.valuation.price)}</div>
                         </div>
-                        <div className="text-center">
+                        <div className="text-center min-w-0 flex-1">
                           <div className="text-xs text-muted-foreground">Upper</div>
-                          <div className="font-semibold text-sm">{symbol}{formatNumber(stock.technical.bollingerUpper)}</div>
+                          <div className="font-semibold text-sm break-all">{symbol}{formatNumber(stock.technical.bollingerUpper)}</div>
                         </div>
                       </div>
                     </div>
