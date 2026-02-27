@@ -5,7 +5,7 @@ import { useStockStore } from "@/app/store/stockStore";
 import { useLanguageStore } from "@/app/store/languageStore";
 import ScreenerPanel from "./ScreenerPanel";
 import StockTable from "./StockTable";
-import PortfolioPanel from "./PortfolioPanel";
+import RealPortfolioPanel from "./RealPortfolioPanel";
 import LanguageSwitcher from "./LanguageSwitcher";
 import DocumentationPanel, { HelpButton } from "./DocumentationPanel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -142,7 +142,7 @@ export default function Dashboard() {
 
           {/* Portfolio Tab */}
           <TabsContent value="portfolio">
-            <PortfolioPanel />
+            <RealPortfolioPanel />
           </TabsContent>
         </Tabs>
       </main>
