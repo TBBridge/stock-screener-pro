@@ -3,8 +3,10 @@
 import { useState } from "react";
 import { useStockStore } from "@/app/store/stockStore";
 import { useLanguageStore } from "@/app/store/languageStore";
+import { useWatchlistStore } from "@/app/store/watchlistStore";
 import { StockData } from "@/app/types/stock";
-import StockDetailModal from "./StockDetailModal";
+import RealStockDetailModal from "./RealStockDetailModal";
+import { toast } from "sonner";
 import {
   Table,
   TableBody,
@@ -42,6 +44,12 @@ const currencySymbols: Record<string, string> = {
   EUR: "€",
 };
 
+// 真实筛选结果里 sector 存的是市场代码
+const marketLabels: Record<string, string> = {
+  CN: "A股", HK: "港股", JP: "日股", US: "美股",
+};
+const marketLabel = (s: string | undefined) => (s && marketLabels[s]) || s || "-";
+
 type SortField = keyof StockData | "score.total" | "valuation.per" | "valuation.pbr" | "valuation.price" | "financial.roe";
 type SortDirection = "asc" | "desc";
 
@@ -53,11 +61,13 @@ interface StockTableProps {
 export default function StockTable({ stocks: propStocks, showActions = true }: StockTableProps) {
   const { screenerResult, isLoading } = useStockStore();
   const { t } = useLanguageStore();
+  const watchlistAdd = useWatchlistStore((s) => s.add);
+  const watchlistHas = useWatchlistStore((s) => s.has);
   const [sortField, setSortField] = useState<SortField>("score.total");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedStock, setSelectedStock] = useState<StockData | null>(null);
-  const [isDetailOpen, setIsDetailOpen] = useState(false);                                                                                                                                                                          
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [isDetailOpen, setIsDetailOpen] = useState(false);
 
   const stocks = propStocks || screenerResult?.stocks || [];
 
@@ -149,7 +159,7 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
   };
 
   const handleStockClick = (stock: StockData) => {
-    setSelectedStock(stock);
+    setSelectedTicker(stock.ticker);
     setIsDetailOpen(true);
   };
 
@@ -294,7 +304,7 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
                   <TableCell>{stock.name}</TableCell>
                   <TableCell>
                     <Badge variant="secondary" className="text-xs">
-                      {stock.sector}
+                      {marketLabel(stock.sector)}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right font-medium">
@@ -328,13 +338,22 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
                             <Eye className="h-4 w-4 mr-2" />
                             View Details
                           </DropdownMenuItem>
-                          <DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() => {
+                              if (watchlistHas(stock.ticker)) {
+                                toast.info(`${stock.ticker} 已在关注列表中`);
+                                return;
+                              }
+                              watchlistAdd({ ticker: stock.ticker, name: stock.name, exchange: stock.exchange });
+                              toast.success(`已添加关注：${stock.ticker}（在"关注股票"页查看实时行情）`);
+                            }}
+                          >
                             <Plus className="h-4 w-4 mr-2" />
-                            Add to Watchlist
+                            加入关注
                           </DropdownMenuItem>
-                          <DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => toast.info(`请在"我的持仓"页通过"添加持仓"录入 ${stock.ticker} 的成本与股数`)}>
                             <Plus className="h-4 w-4 mr-2" />
-                            Add to Portfolio
+                            加入持仓
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -347,9 +366,9 @@ export default function StockTable({ stocks: propStocks, showActions = true }: S
         </Table>
       </div>
 
-      {/* Stock Detail Modal */}
-      <StockDetailModal
-        stock={selectedStock}
+      {/* Stock Detail Modal（真实行情：K线 + 买卖建议 + 新闻） */}
+      <RealStockDetailModal
+        ticker={selectedTicker}
         isOpen={isDetailOpen}
         onClose={() => setIsDetailOpen(false)}
       />

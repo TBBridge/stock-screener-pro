@@ -33,3 +33,10 @@ yarn-error.log*
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
+
+# Playwright CLI 本地测试快照
+.playwright-cli/
+/*.yaml
+
+# WorkBuddy 项目数据
+.workbuddy/

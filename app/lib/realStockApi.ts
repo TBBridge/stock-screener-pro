@@ -1,210 +1,119 @@
-// 真实股票数据API接口
-// 使用 Yahoo Finance API (通过 yfinance 或类似服务)
+// 客户端数据访问层 —— 统一走本地 /api/* 服务端代理（解决浏览器直连 Yahoo 的 CORS 问题）
 
-import { StockData, StockValuation, FinancialData, TechnicalIndicators, AnalystForecast, StockScore } from '@/app/types/stock';
+import { Quote, QuoteSummary, Candle, NewsItem, SearchResult } from '@/app/types/market';
 
-// Yahoo Finance API 基础URL
-const YAHOO_FINANCE_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart';
-const YAHOO_QUOTE_BASE = 'https://query2.finance.yahoo.com/v10/finance/quoteSummary';
+// 轻量内存缓存（避免同页多次重复请求）
+const memCache = new Map<string, { data: unknown; at: number }>();
 
-// 股票代码映射 (将内部代码转换为Yahoo格式)
-const tickerMapping: Record<string, string> = {
-  // A股
-  '600519.SS': '600519.SS', // 茅台
-  '000858.SZ': '000858.SZ', // 五粮液
-  // 美股
-  'AAPL': 'AAPL',
-  'MSFT': 'MSFT',
-  'GOOGL': 'GOOGL',
-  'AMZN': 'AMZN',
-  'NVDA': 'NVDA',
-  'TSLA': 'TSLA',
-  'META': 'META',
-  'NFLX': 'NFLX',
-  // 港股
-  '0700.HK': '0700.HK',
-  '9988.HK': '9988.HK',
-  '3690.HK': '3690.HK',
-  // 日股
-  '7203.T': '7203.T', // 丰田
-  '6758.T': '6758.T', // 索尼
-};
+async function cachedFetch<T>(key: string, url: string, ttlMs: number): Promise<T> {
+  const hit = memCache.get(key);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.data as T;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as any).error || `Request failed: ${res.status}`);
+  }
+  const data = (await res.json()) as T;
+  memCache.set(key, { data, at: Date.now() });
+  if (memCache.size > 300) {
+    const oldest = [...memCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) memCache.delete(oldest[0]);
+  }
+  return data;
+}
 
-// 获取股票实时价格
+// 实时报价（批量）
+export async function getQuotes(tickers: string[]): Promise<Quote[]> {
+  if (tickers.length === 0) return [];
+  const data = await cachedFetch<{ quotes: Quote[] }>(
+    `quotes:${tickers.join(',')}`,
+    `/api/quote?tickers=${encodeURIComponent(tickers.join(','))}`,
+    30 * 1000
+  );
+  return data.quotes;
+}
+
+// 兼容旧调用名
 export async function getStockPrice(ticker: string): Promise<number | null> {
   try {
-    const yahooTicker = tickerMapping[ticker] || ticker;
-    const response = await fetch(`${YAHOO_FINANCE_BASE}/${yahooTicker}?interval=1d&range=1d`);
-    const data = await response.json();
-    
-    if (data.chart?.result?.[0]?.meta?.regularMarketPrice) {
-      return data.chart.result[0].meta.regularMarketPrice;
-    }
-    return null;
-  } catch (error) {
-    console.error(`Failed to fetch price for ${ticker}:`, error);
+    const quotes = await getQuotes([ticker]);
+    return quotes[0]?.price ?? null;
+  } catch {
     return null;
   }
 }
 
-// 获取股票详细信息
-export async function getStockDetails(ticker: string): Promise<Partial<StockData> | null> {
-  try {
-    const yahooTicker = tickerMapping[ticker] || ticker;
-    const modules = 'summaryDetail,defaultKeyStatistics,financialData,price,recommendationTrend';
-    const response = await fetch(`${YAHOO_QUOTE_BASE}/${yahooTicker}?modules=${modules}`);
-    const data = await response.json();
-    
-    if (!data.quoteSummary?.result?.[0]) {
-      return null;
-    }
-
-    const result = data.quoteSummary.result[0];
-    const price = result.price;
-    const summary = result.summaryDetail;
-    const stats = result.defaultKeyStatistics;
-    const financial = result.financialData;
-    const recommendation = result.recommendationTrend;
-
-    return {
-      ticker,
-      name: price?.longName || price?.shortName || ticker,
-      exchange: price?.exchangeName || '',
-      currency: price?.currency || 'USD',
-      sector: price?.sector || '',
-      industry: price?.industry || '',
-      valuation: {
-        ticker,
-        price: price?.regularMarketPrice || 0,
-        per: summary?.trailingPE || null,
-        pbr: summary?.priceToBook || null,
-        dividendYield: summary?.dividendYield ? summary.dividendYield * 100 : null,
-        marketCap: summary?.marketCap || null,
-        week52High: summary?.fiftyTwoWeekHigh || null,
-        week52Low: summary?.fiftyTwoWeekLow || null,
-      },
-      financial: {
-        ticker,
-        revenue: financial?.totalRevenue || null,
-        netIncome: financial?.netIncomeToCommon || null,
-        totalAssets: null, // 需要额外模块
-        totalEquity: null,
-        freeCashFlow: financial?.freeCashflow || null,
-        roe: financial?.returnOnEquity ? financial.returnOnEquity * 100 : null,
-        revenueGrowth: financial?.revenueGrowth ? financial.revenueGrowth * 100 : null,
-      },
-      analyst: {
-        ticker,
-        targetHigh: recommendation?.trend?.[0]?.high || null,
-        targetMean: recommendation?.trend?.[0]?.consensus || null,
-        targetLow: recommendation?.trend?.[0]?.low || null,
-        rating: null,
-        analystCount: recommendation?.trend?.[0]?.numberOfAnalysts || 0,
-      },
-    };
-  } catch (error) {
-    console.error(`Failed to fetch details for ${ticker}:`, error);
-    return null;
-  }
-}
-
-// 获取多只股票数据
-export async function getMultipleStocks(tickers: string[]): Promise<StockData[]> {
-  const stocks: StockData[] = [];
-  
-  for (const ticker of tickers) {
-    const details = await getStockDetails(ticker);
-    if (details) {
-      stocks.push({
-        ...details,
-        technical: {
-          ticker,
-          rsi14: null,
-          sma50: null,
-          sma200: null,
-          bollingerUpper: null,
-          bollingerLower: null,
-        },
-        score: calculateScore(details),
-        lastUpdated: new Date(),
-      } as StockData);
-    }
-  }
-  
-  return stocks;
-}
-
-// 计算股票评分
-function calculateScore(stock: Partial<StockData>): StockScore {
-  const valuation = stock.valuation;
-  const financial = stock.financial;
-  
-  let valueScore = 50;
-  let growthScore = 50;
-  let qualityScore = 50;
-  let technicalScore = 50;
-  
-  // 价值评分
-  if (valuation && valuation.per !== null && valuation.per !== undefined) {
-    if (valuation.per < 10) valueScore += 25;
-    else if (valuation.per < 15) valueScore += 15;
-    else if (valuation.per < 25) valueScore += 5;
-    else valueScore -= 10;
-  }
-  
-  if (valuation && valuation.pbr !== null && valuation.pbr !== undefined) {
-    if (valuation.pbr < 1) valueScore += 15;
-    else if (valuation.pbr < 2) valueScore += 5;
-    else valueScore -= 5;
-  }
-  
-  // 成长评分
-  if (financial && financial.revenueGrowth !== null && financial.revenueGrowth !== undefined) {
-    if (financial.revenueGrowth > 20) growthScore += 25;
-    else if (financial.revenueGrowth > 10) growthScore += 15;
-    else if (financial.revenueGrowth > 0) growthScore += 5;
-    else growthScore -= 10;
-  }
-  
-  // 质量评分
-  if (financial && financial.roe !== null && financial.roe !== undefined) {
-    if (financial.roe > 20) qualityScore += 25;
-    else if (financial.roe > 15) qualityScore += 15;
-    else if (financial.roe > 10) qualityScore += 5;
-    else qualityScore -= 5;
-  }
-  
-  valueScore = Math.max(0, Math.min(100, valueScore));
-  growthScore = Math.max(0, Math.min(100, growthScore));
-  qualityScore = Math.max(0, Math.min(100, qualityScore));
-  technicalScore = Math.max(0, Math.min(100, technicalScore));
-  
-  const alphaScore = Math.round((valueScore + growthScore + qualityScore) / 3);
-  const total = Math.round(valueScore * 0.4 + growthScore * 0.3 + qualityScore * 0.2 + technicalScore * 0.1);
-  
-  return {
-    total,
-    value: valueScore,
-    growth: growthScore,
-    quality: qualityScore,
-    technical: technicalScore,
-    alpha: alphaScore,
+// K线数据 + 技术指标
+export interface ChartData {
+  ticker: string;
+  currency: string;
+  name: string;
+  candles: Candle[];
+  indicators: {
+    rsi14: number | null;
+    sma20: number | null;
+    sma50: number | null;
+    sma200: number | null;
+    bollingerUpper: number | null;
+    bollingerLower: number | null;
   };
 }
 
-// 搜索股票
-export async function searchStocks(query: string): Promise<Array<{ ticker: string; name: string; exchange: string }>> {
-  try {
-    const response = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=10&newsCount=0`);
-    const data = await response.json();
-    
-    return (data.quotes || []).map((quote: any) => ({
-      ticker: quote.symbol,
-      name: quote.longname || quote.shortname || quote.symbol,
-      exchange: quote.exchange || '',
-    }));
-  } catch (error) {
-    console.error('Search failed:', error);
-    return [];
-  }
+export async function getChartData(
+  ticker: string,
+  range = '6mo',
+  interval = '1d'
+): Promise<ChartData> {
+  return cachedFetch<ChartData>(
+    `chart:${ticker}:${range}:${interval}`,
+    `/api/chart?ticker=${encodeURIComponent(ticker)}&range=${range}&interval=${interval}`,
+    60 * 1000
+  );
+}
+
+// 股票详情（估值/财务/分析师/技术指标/K线）
+export async function getStockDetails(ticker: string): Promise<QuoteSummary> {
+  return cachedFetch<QuoteSummary>(
+    `detail:${ticker}`,
+    `/api/details?ticker=${encodeURIComponent(ticker)}`,
+    60 * 1000
+  );
+}
+
+// 新闻（指定股票或市场要闻）
+export async function getStockNews(ticker?: string, count = 15): Promise<NewsItem[]> {
+  const params = new URLSearchParams({ count: String(count) });
+  if (ticker) params.set('ticker', ticker);
+  const data = await cachedFetch<{ news: NewsItem[] }>(
+    `news:${ticker || 'market'}:${count}`,
+    `/api/news?${params.toString()}`,
+    5 * 60 * 1000
+  );
+  return data.news;
+}
+
+// 股票搜索
+export async function searchStocks(query: string): Promise<SearchResult[]> {
+  if (!query.trim()) return [];
+  const data = await cachedFetch<{ results: SearchResult[] }>(
+    `search:${query}`,
+    `/api/search?q=${encodeURIComponent(query.trim())}`,
+    10 * 60 * 1000
+  );
+  return data.results;
+}
+
+// 全球指数行情
+export interface IndexQuote extends Quote {
+  label: string;
+  market: string;
+}
+
+export async function getMarketIndices(): Promise<IndexQuote[]> {
+  const data = await cachedFetch<{ indices: IndexQuote[] }>(
+    'market:default',
+    '/api/market',
+    30 * 1000
+  );
+  return data.indices;
 }
