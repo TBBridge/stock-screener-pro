@@ -31,6 +31,7 @@ export async function GET(req: NextRequest) {
       runRealScreener(engine, criteria as any, klineBudget)
     );
     return NextResponse.json({
+      version: 3,
       engine,
       criteria,
       stocks: result.stocks,
