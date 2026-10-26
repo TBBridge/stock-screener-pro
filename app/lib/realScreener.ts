@@ -34,6 +34,7 @@ const EM_LIST_HOSTS = [
 
 export interface SnapshotRow {
   ticker: string;
+  market: string;
   name: string;
   price: number;
   changePercent: number;
@@ -83,6 +84,7 @@ async function fetchListPage(market: string, page: number): Promise<{ total: num
         };
         rows.push({
           ticker,
+          market,
           name: String(r.f14 || ticker),
           price,
           changePercent: num(r.f3) ?? 0,
@@ -451,6 +453,7 @@ export async function runRealScreener(
         snapshot.push(
           ...UNIVERSE.filter((e) => e.market === m).map((e) => ({
             ticker: e.ticker,
+            market: m,
             name: e.fallbackName || e.ticker,
             price: 0,
             changePercent: 0,
@@ -466,6 +469,7 @@ export async function runRealScreener(
       snapshot.push(
         ...UNIVERSE.filter((e) => e.market === m).map((e) => ({
           ticker: e.ticker,
+          market: m,
           name: e.fallbackName || e.ticker,
           price: 0,
           changePercent: 0,
@@ -490,9 +494,21 @@ export async function runRealScreener(
     return true;
   });
 
-  // 3) 候选排序（市值优先）+ 截断到 K 线预算
-  prefiltered.sort((a, b) => (b.marketCap || 0) - (a.marketCap || 0));
-  const candidates = prefiltered.slice(0, klineBudget);
+  // 3) 候选分配：各市场内部按市值排名，配额均分（不同市场市值币种不可直接比较）
+  const byMarket = new Map<string, SnapshotRow[]>();
+  for (const r of prefiltered) {
+    const arr = byMarket.get(r.market) || [];
+    arr.push(r);
+    byMarket.set(r.market, arr);
+  }
+  const activeMarkets = [...byMarket.keys()];
+  const quota = Math.max(1, Math.floor(klineBudget / Math.max(1, activeMarkets.length)));
+  const candidates: SnapshotRow[] = [];
+  for (const m of activeMarkets) {
+    const rows = byMarket.get(m)!;
+    rows.sort((a, b) => (b.marketCap || 0) - (a.marketCap || 0));
+    candidates.push(...rows.slice(0, quota));
+  }
 
   // 回退池/缺估值的候选，用腾讯批量报价富化（一次请求）
   const needEnrich = candidates.filter((c) => c.price <= 0 || c.per === null || c.pbr === null);
