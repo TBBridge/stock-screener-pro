@@ -20,8 +20,9 @@ const MARKET_FS: Record<string, string> = {
   JP: 'm:176',
 };
 
-// 每个市场最多拉取的页数（pz=500/页），控制扫描时间
-const MAX_PAGES: Record<string, number> = { CN: 14, HK: 8, US: 26, JP: 12 };
+// 每个市场最多扫描的行数（控制扫描时间；列表已按市值降序，即覆盖头部股票）
+const MAX_ROWS: Record<string, number> = { CN: 6000, HK: 3000, US: 4000, JP: 2000 };
+const PAGE_SIZE = 100; // 东财 clist 单页实际上限约 100-130 行，明确用 100
 
 const EM_LIST_HOSTS = [
   'https://push2delay.eastmoney.com',
@@ -60,7 +61,7 @@ async function fetchListPage(market: string, page: number): Promise<{ total: num
   const fs = MARKET_FS[market];
   for (const host of EM_LIST_HOSTS) {
     try {
-      const url = `${host}/api/qt/clist/get?pn=${page}&pz=500&po=1&np=1&fltt=2&invt=2&fid=f20&fs=${fs}&fields=f2,f3,f5,f9,f12,f14,f20,f23`;
+      const url = `${host}/api/qt/clist/get?pn=${page}&pz=${PAGE_SIZE}&po=1&np=1&fltt=2&invt=2&fid=f20&fs=${fs}&fields=f2,f3,f5,f9,f12,f14,f20,f23`;
       const res = await fetch(url, {
         cache: 'no-store',
         signal: AbortSignal.timeout(10000),
@@ -110,13 +111,15 @@ async function fetchMarketSnapshot(market: string): Promise<SnapshotRow[]> {
   const first = await fetchListPage(market, 1);
   if (!first) return []; // 东财不可用 → 空数组，由上层回退精选池
   all.push(...first.rows);
-  const pages = Math.min(Math.ceil(first.total / 500), MAX_PAGES[market] || 10);
-  // 并发拉剩余页（限 4）
+  // 用实际返回的每页行数计算页数（服务端会限制单页大小）
+  const rowsPerPage = Math.max(1, first.rows.length);
+  const maxPages = Math.min(Math.ceil((first.total || 0) / rowsPerPage), Math.ceil((MAX_ROWS[market] || 3000) / PAGE_SIZE));
+  // 并发拉剩余页（限 6）
   let next = 2;
-  const workers = Array.from({ length: Math.max(0, Math.min(4, pages - 1)) }, async () => {
+  const workers = Array.from({ length: Math.max(0, Math.min(6, maxPages - 1)) }, async () => {
     while (true) {
       const p = next++;
-      if (p > pages) break;
+      if (p > maxPages) break;
       const r = await fetchListPage(market, p);
       if (r) all.push(...r.rows);
     }
@@ -429,6 +432,21 @@ export async function runRealScreener(
   for (const { m, rows } of marketResults) {
     if (rows.length > 0) {
       snapshot.push(...rows);
+      // 快照覆盖不足（如日股东财仅少量条目）时补充精选池
+      if (rows.length < 50) {
+        snapshot.push(
+          ...UNIVERSE.filter((e) => e.market === m).map((e) => ({
+            ticker: e.ticker,
+            name: e.fallbackName || e.ticker,
+            price: 0,
+            changePercent: 0,
+            per: null as number | null,
+            pbr: null as number | null,
+            marketCap: null as number | null,
+            volume: null as number | null,
+          }))
+        );
+      }
     } else {
       fallbackUniverse = true;
       snapshot.push(

@@ -4,7 +4,8 @@ import { cached } from '@/app/lib/apiCache';
 import { ScreenerEngine } from '@/app/types/stock';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60;
+export const maxDuration = 120;
+export const runtime = 'nodejs';
 
 const ENGINES: ScreenerEngine[] = ['value', 'pullback', 'alpha', 'custom'];
 
