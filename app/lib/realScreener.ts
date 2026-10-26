@@ -27,8 +27,9 @@ const PAGE_SIZE = 100; // 东财 clist 单页实际上限约 100-130 行，明�
 const EM_LIST_HOSTS = [
   'https://push2delay.eastmoney.com',
   'https://23.push2.eastmoney.com',
-  'https://push2.eastmoney.com',
+  'https://48.push2.eastmoney.com',
   'https://92.push2.eastmoney.com',
+  'https://push2.eastmoney.com',
 ];
 
 export interface SnapshotRow {
@@ -126,10 +127,13 @@ async function fetchMarketSnapshot(market: string): Promise<SnapshotRow[]> {
   });
   await Promise.all(workers);
 
-  // 去重
+  // 去重；只有覆盖足够完整时才缓存（避免东财半故障时把残缺列表缓存 30 分钟）
   const seen = new Set<string>();
   const dedup = all.filter((r) => (seen.has(r.ticker) ? false : (seen.add(r.ticker), true)));
-  if (dedup.length > 0) snapshotCache.set(market, { rows: dedup, at: Date.now() });
+  const expected = first.total || 0;
+  if (dedup.length > 0 && (dedup.length >= expected * 0.8 || dedup.length > 800)) {
+    snapshotCache.set(market, { rows: dedup, at: Date.now() });
+  }
   return dedup;
 }
 
@@ -224,6 +228,8 @@ async function tencentCloses(ticker: string, count = 260): Promise<number[] | nu
 const EM_KLINE_HOSTS = [
   'https://23.push2his.eastmoney.com',
   'https://push2delay.eastmoney.com',
+  'https://48.push2his.eastmoney.com',
+  'https://92.push2his.eastmoney.com',
   'https://push2his.eastmoney.com',
 ];
 
