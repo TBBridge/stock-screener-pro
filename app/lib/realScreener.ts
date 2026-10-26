@@ -1,52 +1,159 @@
-// 真实数据筛选引擎（服务端专用）
-// 数据源策略：腾讯优先（批量报价 + 逐票日K，A股/港股/美股稳定）→ Yahoo（日股）→ 东财兜底
+// 全市场真实筛选引擎（服务端专用）
+// 两段式：
+//   1) 东财全市场快照（价格/PE/PB/市值/涨跌幅）→ 按估值条件预过滤
+//   2) 对候选股（按市值排序取前 N）拉日K（腾讯/东财/Yahoo）算 RSI/SMA/动量 → 技术过滤 + 评分
+// 数据源分级：A股/港股=腾讯日K；美股/日股=东财日K→Yahoo；快照=东财 clist（失败时回退精选池）
 
 import { StockData, ScreenerEngine } from '@/app/types/stock';
-import { UNIVERSE, marketOf, exchangeLabel, UniverseEntry } from '@/app/lib/universe';
+import { UNIVERSE, marketOf, exchangeLabel } from '@/app/lib/universe';
 import { RealCriteria } from '@/app/lib/realScreenerTypes';
 import { rsi as calcRsi, sma as calcSma } from '@/app/lib/yahooServer';
 
 export type { RealCriteria };
 
-// ---------- 数据抓取 ----------
+// ---------- 全市场快照（东财 clist） ----------
 
-interface RawStock {
-  entry: UniverseEntry;
+const MARKET_FS: Record<string, string> = {
+  CN: 'm:0+t:6,m:0+t:80,m:0+t:81+s:2048,m:1+t:2,m:1+t:23',
+  HK: 'm:116',
+  US: 'm:105,m:106,m:107',
+  JP: 'm:176',
+};
+
+// 每个市场最多拉取的页数（pz=500/页），控制扫描时间
+const MAX_PAGES: Record<string, number> = { CN: 14, HK: 8, US: 26, JP: 12 };
+
+const EM_LIST_HOSTS = [
+  'https://push2delay.eastmoney.com',
+  'https://23.push2.eastmoney.com',
+  'https://push2.eastmoney.com',
+  'https://92.push2.eastmoney.com',
+];
+
+export interface SnapshotRow {
+  ticker: string;
   name: string;
   price: number;
   changePercent: number;
-  marketCap: number | null; // 本币
   per: number | null;
   pbr: number | null;
-  rsi14: number | null;
-  sma50: number | null;
-  sma200: number | null;
-  momentum20: number | null; // 20日涨幅 %
-  week52High: number | null;
-  week52Low: number | null;
+  marketCap: number | null;
+  volume: number | null;
 }
 
-// 腾讯批量报价（一次请求），返回 ticker -> {price, changePercent, pe, pb, marketCap(本币), name}
+function mapCodeToTicker(market: string, code: string): string | null {
+  if (market === 'CN') {
+    if (/^6/.test(code)) return `${code}.SS`;
+    if (/^[03]/.test(code)) return `${code}.SZ`;
+    return null; // 北交所等 K 线源暂不支持的排除
+  }
+  if (market === 'HK') {
+    return /^\d{1,5}$/.test(code) ? `${code}.HK` : null;
+  }
+  if (market === 'JP') {
+    return /^\d{4}$/.test(code) ? `${code}.T` : null;
+  }
+  return /^[A-Z]{1,5}$/.test(code) ? code : null; // US
+}
+
+async function fetchListPage(market: string, page: number): Promise<{ total: number; rows: SnapshotRow[] } | null> {
+  const fs = MARKET_FS[market];
+  for (const host of EM_LIST_HOSTS) {
+    try {
+      const url = `${host}/api/qt/clist/get?pn=${page}&pz=500&po=1&np=1&fltt=2&invt=2&fid=f20&fs=${fs}&fields=f2,f3,f5,f9,f12,f14,f20,f23`;
+      const res = await fetch(url, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10000),
+        headers: { Referer: 'https://quote.eastmoney.com/', 'User-Agent': 'Mozilla/5.0' },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const dt = data?.data;
+      if (!dt?.diff) continue;
+      const rows: SnapshotRow[] = [];
+      for (const r of dt.diff) {
+        const ticker = mapCodeToTicker(market, String(r.f12 || ''));
+        const price = typeof r.f2 === 'number' ? r.f2 : parseFloat(r.f2);
+        if (!ticker || !Number.isFinite(price) || price <= 0) continue; // 停牌/无效
+        const num = (v: any) => {
+          const n = typeof v === 'number' ? v : parseFloat(v);
+          return Number.isFinite(n) ? n : null;
+        };
+        rows.push({
+          ticker,
+          name: String(r.f14 || ticker),
+          price,
+          changePercent: num(r.f3) ?? 0,
+          per: num(r.f9),
+          pbr: num(r.f23),
+          marketCap: num(r.f20),
+          volume: num(r.f5),
+        });
+      }
+      return { total: typeof dt.total === 'number' ? dt.total : rows.length, rows };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+// 快照缓存（30 分钟）：全市场列表变化慢，缓存后重复筛选秒级返回
+const snapshotCache = new Map<string, { rows: SnapshotRow[]; at: number }>();
+const SNAPSHOT_TTL = 30 * 60 * 1000;
+
+async function fetchMarketSnapshot(market: string): Promise<SnapshotRow[]> {
+  const hit = snapshotCache.get(market);
+  if (hit && Date.now() - hit.at < SNAPSHOT_TTL) return hit.rows;
+
+  const all: SnapshotRow[] = [];
+  const first = await fetchListPage(market, 1);
+  if (!first) return []; // 东财不可用 → 空数组，由上层回退精选池
+  all.push(...first.rows);
+  const pages = Math.min(Math.ceil(first.total / 500), MAX_PAGES[market] || 10);
+  // 并发拉剩余页（限 4）
+  let next = 2;
+  const workers = Array.from({ length: Math.max(0, Math.min(4, pages - 1)) }, async () => {
+    while (true) {
+      const p = next++;
+      if (p > pages) break;
+      const r = await fetchListPage(market, p);
+      if (r) all.push(...r.rows);
+    }
+  });
+  await Promise.all(workers);
+
+  // 去重
+  const seen = new Set<string>();
+  const dedup = all.filter((r) => (seen.has(r.ticker) ? false : (seen.add(r.ticker), true)));
+  if (dedup.length > 0) snapshotCache.set(market, { rows: dedup, at: Date.now() });
+  return dedup;
+}
+
+// ---------- 腾讯批量报价（回退精选池时富化 价格/PE/PB/市值） ----------
+
+function toTencentSym(ticker: string): string | null {
+  const m = marketOf(ticker);
+  if (m === 'CN') return `${ticker.endsWith('.SS') ? 'sh' : 'sz'}${ticker.slice(0, 6)}`;
+  if (m === 'HK') return `hk${ticker.split('.')[0].padStart(5, '0')}`;
+  if (m === 'US') return `us${ticker}`;
+  return null;
+}
+
 async function tencentBatchQuotes(tickers: string[]): Promise<Map<string, any>> {
   const map = new Map<string, any>();
-  const symMap = new Map<string, string>(); // tencentSym -> ticker
   const syms: string[] = [];
+  const symMap = new Map<string, string>();
   for (const t of tickers) {
-    const m = marketOf(t);
-    let sym: string | null = null;
-    if (m === 'CN') sym = `${t.endsWith('.SS') ? 'sh' : 'sz'}${t.slice(0, 6)}`;
-    else if (m === 'HK') sym = `hk${t.split('.')[0].padStart(5, '0')}`;
-    else if (m === 'US') sym = `us${t}`;
+    const sym = toTencentSym(t);
     if (sym) {
       syms.push(sym);
       symMap.set(sym, t);
     }
   }
-  if (syms.length === 0) return map;
-  try {
-    // 分批，每批 60 个
-    for (let i = 0; i < syms.length; i += 60) {
-      const batch = syms.slice(i, i + 60);
+  for (let i = 0; i < syms.length; i += 60) {
+    const batch = syms.slice(i, i + 60);
+    try {
       const res = await fetch(`https://qt.gtimg.cn/q=${batch.join(',')}`, {
         cache: 'no-store',
         signal: AbortSignal.timeout(8000),
@@ -54,39 +161,31 @@ async function tencentBatchQuotes(tickers: string[]): Promise<Map<string, any>> 
       if (!res.ok) continue;
       const text = new TextDecoder('gbk').decode(await res.arrayBuffer());
       for (const m of text.matchAll(/v_(\w+)="([^"]*)"/g)) {
-        const sym = m[1];
+        const ticker = symMap.get(m[1]);
         const f = m[2].split('~');
-        const ticker = symMap.get(sym);
         if (!ticker || f.length < 46 || !f[3]) continue;
         const price = parseFloat(f[3]);
         if (Number.isNaN(price) || price <= 0) continue;
-        const prev = parseFloat(f[4]) || price;
         const pe = parseFloat(f[39]);
         const pb = parseFloat(f[46]);
-        const w52h = parseFloat(f[47]);
-        const w52l = parseFloat(f[48]);
-        const w52Valid = !Number.isNaN(w52h) && !Number.isNaN(w52l) && w52h > w52l && w52l < price * 1.6 && w52h > price * 0.5;
         const mcapYi = parseFloat(f[45]);
         map.set(ticker, {
-          name: f[1] || '',
           price,
-          changePercent: prev ? ((price - prev) / prev) * 100 : 0,
+          changePercent: parseFloat(f[4]) ? ((price - parseFloat(f[4])) / parseFloat(f[4])) * 100 : 0,
           per: !Number.isNaN(pe) && pe > 0 ? pe : null,
           pbr: !Number.isNaN(pb) && pb > 0 ? pb : null,
           marketCap: !Number.isNaN(mcapYi) && mcapYi > 0 ? mcapYi * 1e8 : null,
-          week52High: w52Valid ? w52h : null,
-          week52Low: w52Valid ? w52l : null,
         });
       }
+    } catch {
+      continue;
     }
-  } catch {
-    // 整体失败则返回空 map，逐票走 chart
   }
   return map;
 }
 
-// 腾讯日K（A股/港股/美股），返回收盘价序列（升序）
-// 注意：web.ifzq.gtimg.cn 对高频请求会触发 WAF，使用 ifzq.gtimg.cn / proxy.finance.qq.com 多 host 轮询
+// ---------- 日K收盘价（腾讯 → 东财 → Yahoo） ----------
+
 const TENCENT_KLINE_HOSTS = ['https://ifzq.gtimg.cn', 'https://proxy.finance.qq.com/ifzqgtimg'];
 
 async function tencentCloses(ticker: string, count = 260): Promise<number[] | null> {
@@ -119,7 +218,45 @@ async function tencentCloses(ticker: string, count = 260): Promise<number[] | nu
   return null;
 }
 
-// Yahoo 日K收盘价（美股/日股），带熔断器：连续失败 5 次则跳过 60 秒，避免 429 期间反复重试拖慢筛选
+const EM_KLINE_HOSTS = [
+  'https://23.push2his.eastmoney.com',
+  'https://push2delay.eastmoney.com',
+  'https://push2his.eastmoney.com',
+];
+
+function toEastmoneySecid(ticker: string): string | null {
+  if (/^\d{6}\.SS$/i.test(ticker)) return `1.${ticker.slice(0, 6)}`;
+  if (/^\d{6}\.SZ$/i.test(ticker)) return `0.${ticker.slice(0, 6)}`;
+  if (/^\d{1,5}\.HK$/i.test(ticker)) return `116.${ticker.split('.')[0].padStart(5, '0')}`;
+  if (/^\d{4}\.T$/i.test(ticker)) return `176.${ticker.split('.')[0]}`;
+  return null;
+}
+
+async function eastmoneyCloses(ticker: string, count = 260): Promise<{ closes: number[]; name: string } | null> {
+  const secid = toEastmoneySecid(ticker);
+  const secids = secid ? [secid] : /^[A-Z]{1,5}$/i.test(ticker) ? [`105.${ticker}`, `106.${ticker}`] : [];
+  for (const sid of secids) {
+    for (const host of EM_KLINE_HOSTS) {
+      try {
+        const res = await fetch(
+          `${host}/api/qt/stock/kline/get?secid=${sid}&klt=101&fqt=1&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&end=20500101&lmt=${count}`,
+          { cache: 'no-store', signal: AbortSignal.timeout(7000), headers: { Referer: 'https://quote.eastmoney.com/' } }
+        );
+        if (!res.ok) continue;
+        const data = await res.json();
+        const klines: string[] = data?.data?.klines || [];
+        if (!Array.isArray(klines) || klines.length === 0) continue;
+        const closes = klines.map((l) => parseFloat(l.split(',')[2])).filter((v) => !Number.isNaN(v));
+        if (closes.length > 0) return { closes, name: data.data?.name || '' };
+      } catch {
+        continue;
+      }
+    }
+  }
+  return null;
+}
+
+// Yahoo 日K（最后兜底），带熔断器：连败 5 次暂停 60 秒
 let yahooFails = 0;
 let yahooSkipUntil = 0;
 async function yahooCloses(ticker: string, count = 260): Promise<number[] | null> {
@@ -127,7 +264,11 @@ async function yahooCloses(ticker: string, count = 260): Promise<number[] | null
   try {
     const res = await fetch(
       `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1y&includePrePost=false`,
-      { cache: 'no-store', signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36' } }
+      {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(8000),
+        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36' },
+      }
     );
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
@@ -146,42 +287,8 @@ async function yahooCloses(ticker: string, count = 260): Promise<number[] | null
   }
 }
 
-// 东财日K收盘价（日股兜底）
-const EM_HOSTS = ['https://23.push2his.eastmoney.com', 'https://push2delay.eastmoney.com', 'https://push2his.eastmoney.com'];
-async function eastmoneyClosesAndMeta(ticker: string): Promise<{ closes: number[]; name: string } | null> {
-  let secid: string | null = null;
-  if (/^\d{6}\.SS$/i.test(ticker)) secid = `1.${ticker.slice(0, 6)}`;
-  else if (/^\d{6}\.SZ$/i.test(ticker)) secid = `0.${ticker.slice(0, 6)}`;
-  else if (/^\d{1,5}\.HK$/i.test(ticker)) secid = `116.${ticker.split('.')[0].padStart(5, '0')}`;
-  else if (/^\d{4}\.T$/i.test(ticker)) secid = `176.${ticker.split('.')[0]}`;
-  else if (/^[A-Z]{1,5}$/i.test(ticker)) secid = `105.${ticker.toUpperCase()}`; // 美股（NASDAQ 优先，NYCE 由下面轮询 106 补试）
-  if (!secid) return null;
-  const secids = /^[A-Z]{1,5}$/i.test(ticker) ? [`105.${ticker.toUpperCase()}`, `106.${ticker.toUpperCase()}`] : [secid];
-  for (const sid of secids) {
-    for (const host of EM_HOSTS) {
-      try {
-        const res = await fetch(
-          `${host}/api/qt/stock/kline/get?secid=${sid}&klt=101&fqt=1&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58&end=20500101&lmt=260`,
-          { cache: 'no-store', signal: AbortSignal.timeout(6000), headers: { Referer: 'https://quote.eastmoney.com/' } }
-        );
-        if (!res.ok) continue;
-        const data = await res.json();
-        const klines: string[] = data?.data?.klines || [];
-        if (!Array.isArray(klines) || klines.length === 0) continue;
-        const closes = klines.map((l) => parseFloat(l.split(',')[2])).filter((v) => !Number.isNaN(v));
-        if (closes.length === 0) continue;
-        return { closes, name: data.data?.name || '' };
-      } catch {
-        continue;
-      }
-    }
-  }
-  return null;
-}
-
-// 日K收盘价内存缓存（10分钟，降低上游压力、加速重复筛选）
 const closesCache = new Map<string, { closes: number[]; source: string; name?: string; at: number }>();
-const CLOSES_TTL = 10 * 60 * 1000;
+const CLOSES_TTL = 30 * 60 * 1000;
 
 async function fetchCloses(ticker: string): Promise<{ closes: number[]; source: string; name?: string } | null> {
   const hit = closesCache.get(ticker);
@@ -190,26 +297,17 @@ async function fetchCloses(ticker: string): Promise<{ closes: number[]; source: 
   }
   const m = marketOf(ticker);
   let result: { closes: number[]; source: string; name?: string } | null = null;
-  if (m === 'US') {
-    // 腾讯不支持美股日K，直接走 Yahoo → 东财
-    const yahoo = await yahooCloses(ticker);
-    if (yahoo && yahoo.length >= 30) result = { closes: yahoo, source: 'yahoo' };
-    else {
-      const em = await eastmoneyClosesAndMeta(ticker);
-      if (em) result = { closes: em.closes, source: 'eastmoney', name: em.name };
-    }
-  } else {
-    // A股/港股/日股：腾讯优先
-    const tencent = await tencentCloses(ticker);
-    if (tencent && tencent.length >= 30) result = { closes: tencent, source: 'tencent' };
-    else {
-      const yahoo = await yahooCloses(ticker);
-      if (yahoo && yahoo.length >= 30) result = { closes: yahoo, source: 'yahoo' };
-      else {
-        const em = await eastmoneyClosesAndMeta(ticker);
-        if (em) result = { closes: em.closes, source: 'eastmoney', name: em.name };
-      }
-    }
+  if (m === 'CN' || m === 'HK') {
+    const t = await tencentCloses(ticker);
+    if (t && t.length >= 30) result = { closes: t, source: 'tencent' };
+  }
+  if (!result) {
+    const em = await eastmoneyCloses(ticker);
+    if (em) result = { closes: em.closes, source: 'eastmoney', name: em.name };
+  }
+  if (!result) {
+    const y = await yahooCloses(ticker);
+    if (y && y.length >= 30) result = { closes: y, source: 'yahoo' };
   }
   if (result) closesCache.set(ticker, { ...result, at: Date.now() });
   return result;
@@ -224,59 +322,65 @@ function indicatorsFromCloses(closes: number[]) {
     sma50: calcSma(closes, 50),
     sma200: calcSma(closes, 200),
     momentum20,
+    week52High: Math.max(...closes.slice(-250)),
+    week52Low: Math.min(...closes.slice(-250)),
   };
 }
 
 // ---------- 过滤 + 评分 ----------
 
-function passes(stock: RawStock, c: RealCriteria): { pass: boolean; failedOn?: string } {
-  if (c.markets?.length && !c.markets.includes(stock.entry.market)) return { pass: false, failedOn: 'market' };
-
-  if (c.perMin !== undefined && (stock.per === null || stock.per < c.perMin)) return { pass: false, failedOn: 'per' };
-  if (c.perMax !== undefined && (stock.per === null || stock.per > c.perMax)) return { pass: false, failedOn: 'per' };
-  if (c.pbrMax !== undefined && (stock.pbr === null || stock.pbr > c.pbrMax)) return { pass: false, failedOn: 'pbr' };
-  if (c.marketCapMinYi !== undefined && (stock.marketCap === null || stock.marketCap < c.marketCapMinYi * 1e8))
-    return { pass: false, failedOn: 'marketCap' };
-
-  if (c.rsiMin !== undefined && (stock.rsi14 === null || stock.rsi14 < c.rsiMin)) return { pass: false, failedOn: 'rsi' };
-  if (c.rsiMax !== undefined && (stock.rsi14 === null || stock.rsi14 > c.rsiMax)) return { pass: false, failedOn: 'rsi' };
-
-  if (c.aboveSMA50 && stock.sma50 !== null && stock.price < stock.sma50) return { pass: false, failedOn: 'sma50' };
-  if (c.aboveSMA200 && stock.sma200 !== null && stock.price < stock.sma200) return { pass: false, failedOn: 'sma200' };
-
-  if (c.momentumMin !== undefined && (stock.momentum20 === null || stock.momentum20 < c.momentumMin))
-    return { pass: false, failedOn: 'momentum' };
-
-  if (c.week52PosMax !== undefined) {
-    if (stock.week52High === null || stock.week52Low === null) return { pass: false, failedOn: 'week52' };
-    const range = stock.week52High - stock.week52Low;
-    if (range <= 0) return { pass: false, failedOn: 'week52' };
-    const pos = (stock.price - stock.week52Low) / range;
-    if (pos > c.week52PosMax) return { pass: false, failedOn: 'week52' };
-  }
-
-  return { pass: true };
+interface RawStock {
+  ticker: string;
+  name: string;
+  market: string;
+  price: number;
+  changePercent: number;
+  marketCap: number | null;
+  per: number | null;
+  pbr: number | null;
+  rsi14: number | null;
+  sma50: number | null;
+  sma200: number | null;
+  momentum20: number | null;
+  week52High: number | null;
+  week52Low: number | null;
 }
 
-// 评分（0-100）
+function passes(stock: RawStock, c: RealCriteria): boolean {
+  if (c.markets?.length && !c.markets.includes(stock.market)) return false;
+  if (c.perMin !== undefined && (stock.per === null || stock.per < c.perMin)) return false;
+  if (c.perMax !== undefined && (stock.per === null || stock.per > c.perMax)) return false;
+  if (c.pbrMax !== undefined && (stock.pbr === null || stock.pbr > c.pbrMax)) return false;
+  if (c.marketCapMinYi !== undefined && (stock.marketCap === null || stock.marketCap < c.marketCapMinYi * 1e8)) return false;
+  if (c.rsiMin !== undefined && (stock.rsi14 === null || stock.rsi14 < c.rsiMin)) return false;
+  if (c.rsiMax !== undefined && (stock.rsi14 === null || stock.rsi14 > c.rsiMax)) return false;
+  if (c.aboveSMA50 && stock.sma50 !== null && stock.price < stock.sma50) return false;
+  if (c.aboveSMA200 && stock.sma200 !== null && stock.price < stock.sma200) return false;
+  if (c.momentumMin !== undefined && (stock.momentum20 === null || stock.momentum20 < c.momentumMin)) return false;
+  if (c.week52PosMax !== undefined) {
+    if (stock.week52High === null || stock.week52Low === null) return false;
+    const range = stock.week52High - stock.week52Low;
+    if (range <= 0) return false;
+    if ((stock.price - stock.week52Low) / range > c.week52PosMax) return false;
+  }
+  return true;
+}
+
 function scoreStock(s: RawStock) {
-  // 价值分：PER/PBR 越低越好
   let value = 40;
   if (s.per !== null) value += s.per < 10 ? 30 : s.per < 15 ? 22 : s.per < 20 ? 14 : s.per < 30 ? 6 : 0;
   if (s.pbr !== null) value += s.pbr < 1 ? 30 : s.pbr < 1.5 ? 22 : s.pbr < 3 ? 12 : 0;
 
-  // 技术分：RSI 健康度 + 均线趋势
   let technical = 30;
   if (s.rsi14 !== null) {
     if (s.rsi14 > 75) technical -= 15;
     else if (s.rsi14 > 65) technical -= 5;
     else if (s.rsi14 >= 40) technical += 15;
-    else technical += 5; // 超卖反弹潜力
+    else technical += 5;
   }
   if (s.sma50 !== null && s.sma200 !== null) technical += s.sma50 > s.sma200 ? 15 : -10;
   else if (s.sma50 !== null) technical += s.price > s.sma50 ? 8 : -5;
 
-  // 动量分：20日涨幅
   let momentum = 35;
   if (s.momentum20 !== null) momentum = Math.max(0, Math.min(70, 35 + s.momentum20 * 2));
 
@@ -290,7 +394,7 @@ function scoreStock(s: RawStock) {
 
 function engineDefaultCriteria(engine: ScreenerEngine): RealCriteria {
   switch (engine) {
-    case 'value': return { perMax: 20, pbrMax: 3, marketCapMinYi: 500 };
+    case 'value': return { perMax: 20, pbrMax: 3, marketCapMinYi: 100 };
     case 'pullback': return { rsiMin: 25, rsiMax: 50, aboveSMA200: true };
     case 'alpha': return { momentumMin: 0, aboveSMA50: true, rsiMax: 75 };
     default: return {};
@@ -299,66 +403,128 @@ function engineDefaultCriteria(engine: ScreenerEngine): RealCriteria {
 
 // ---------- 主入口 ----------
 
+export interface ScreenerRunStats {
+  snapshotSize: number;
+  prefiltered: number;
+  klineFetched: number;
+  klineBudget: number;
+  fallbackUniverse: boolean;
+  sources: Record<string, number>;
+}
+
 export async function runRealScreener(
   engine: ScreenerEngine,
   customCriteria?: RealCriteria,
-  universeLimit?: number
-): Promise<{ stocks: StockData[]; universeSize: number; fetched: number; sources: Record<string, number> }> {
-  const pool = (universeLimit ? UNIVERSE.slice(0, universeLimit) : UNIVERSE);
+  klineBudget = 150
+): Promise<{ stocks: StockData[]; stats: ScreenerRunStats }> {
   const criteria = engine === 'custom' ? (customCriteria || {}) : engineDefaultCriteria(engine);
+  const markets = criteria.markets?.length ? criteria.markets : ['CN', 'HK', 'US', 'JP'];
 
-  // 1) 批量报价（一次请求）
-  const quoteMap = await tencentBatchQuotes(pool.map((e) => e.ticker));
+  // 1) 全市场快照（东财），失败的市场回退精选池
+  let snapshot: SnapshotRow[] = [];
+  let fallbackUniverse = false;
+  const marketResults = await Promise.all(
+    markets.map(async (m) => ({ m, rows: await fetchMarketSnapshot(m) }))
+  );
+  for (const { m, rows } of marketResults) {
+    if (rows.length > 0) {
+      snapshot.push(...rows);
+    } else {
+      fallbackUniverse = true;
+      snapshot.push(
+        ...UNIVERSE.filter((e) => e.market === m).map((e) => ({
+          ticker: e.ticker,
+          name: e.fallbackName || e.ticker,
+          price: 0,
+          changePercent: 0,
+          per: null as number | null,
+          pbr: null as number | null,
+          marketCap: null as number | null,
+          volume: null as number | null,
+        }))
+      );
+    }
+  }
 
-  // 2) 逐票日K（腾讯优先，并发 4 + 错峰，避免触发上游限流）
+  const snapshotSize = snapshot.length;
+
+  // 2) 估值/市场预过滤（快照数据即可完成）
+  const prefiltered = snapshot.filter((r) => {
+    if (r.price <= 0) return true; // 回退池价格未知，进入候选拉K线时校验
+    if (criteria.perMin !== undefined && (r.per === null || r.per < criteria.perMin)) return false;
+    if (criteria.perMax !== undefined && (r.per === null || r.per > criteria.perMax)) return false;
+    if (criteria.pbrMax !== undefined && (r.pbr === null || r.pbr > criteria.pbrMax)) return false;
+    if (criteria.marketCapMinYi !== undefined && (r.marketCap === null || r.marketCap < criteria.marketCapMinYi * 1e8)) return false;
+    return true;
+  });
+
+  // 3) 候选排序（市值优先）+ 截断到 K 线预算
+  prefiltered.sort((a, b) => (b.marketCap || 0) - (a.marketCap || 0));
+  const candidates = prefiltered.slice(0, klineBudget);
+
+  // 回退池/缺估值的候选，用腾讯批量报价富化（一次请求）
+  const needEnrich = candidates.filter((c) => c.price <= 0 || c.per === null || c.pbr === null);
+  const quoteMap = needEnrich.length > 0 ? await tencentBatchQuotes(needEnrich.map((c) => c.ticker)) : new Map();
+  for (const c of candidates) {
+    const q = quoteMap.get(c.ticker);
+    if (q) {
+      if (c.price <= 0) c.price = q.price;
+      if (c.per === null) c.per = q.per;
+      if (c.pbr === null) c.pbr = q.pbr;
+      if (c.marketCap === null) c.marketCap = q.marketCap;
+    }
+  }
+
+  // 4) 拉日K计算技术指标（并发 5）
   const sources: Record<string, number> = {};
   const raw: RawStock[] = [];
   let next = 0;
-  const workers = Array.from({ length: 4 }, async () => {
+  const workers = Array.from({ length: 5 }, async () => {
     while (true) {
       const i = next++;
-      if (i >= pool.length) break;
-      const entry = pool[i];
-      const q = quoteMap.get(entry.ticker) || {};
-      const fetched = await fetchCloses(entry.ticker);
-      if (!fetched) continue; // 数据源全失败则跳过（日股网络受限时会这样）
+      if (i >= candidates.length) break;
+      const c = candidates[i];
+      const fetched = await fetchCloses(c.ticker);
+      if (!fetched) continue;
       sources[fetched.source] = (sources[fetched.source] || 0) + 1;
-      const price = q.price ?? fetched.closes[fetched.closes.length - 1];
-      const ind = indicatorsFromCloses(fetched.closes);
+      const closes = fetched.closes;
+      const price = c.price > 0 ? c.price : closes[closes.length - 1];
+      const ind = indicatorsFromCloses(closes);
       raw.push({
-        entry,
-        name: q.name || fetched.name || entry.fallbackName || entry.ticker,
+        ticker: c.ticker,
+        name: c.name || fetched.name || c.ticker,
+        market: marketOf(c.ticker),
         price,
-        changePercent: q.changePercent ?? 0,
-        marketCap: q.marketCap ?? null,
-        per: q.per ?? null,
-        pbr: q.pbr ?? null,
-        week52High: q.week52High ?? Math.max(...fetched.closes.slice(-250)),
-        week52Low: q.week52Low ?? Math.min(...fetched.closes.slice(-250)),
-        ...ind,
+        changePercent: c.changePercent,
+        marketCap: c.marketCap,
+        per: c.per,
+        pbr: c.pbr,
+        week52High: ind.week52High,
+        week52Low: ind.week52Low,
+        rsi14: ind.rsi14,
+        sma50: ind.sma50,
+        sma200: ind.sma200,
+        momentum20: ind.momentum20,
       });
     }
   });
   await Promise.all(workers);
 
-  // 3) 过滤
-  const passed = raw.filter((s) => passes(s, criteria).pass);
-
-  // 4) 评分 + 排序（映射为 StockData 供现有表格复用）
+  // 5) 技术条件过滤 + 评分
+  const passed = raw.filter((s) => passes(s, criteria));
   const stocks: StockData[] = passed
     .map((s) => {
       const sc = scoreStock(s);
-      sc.total = Math.round(sc.value * 0.4 + sc.technical * 0.25 + sc.momentum * 0.35);
-      if (sc.total > 100) sc.total = 100;
+      sc.total = Math.min(100, Math.round(sc.value * 0.4 + sc.technical * 0.25 + sc.momentum * 0.35));
       return {
-        ticker: s.entry.ticker,
+        ticker: s.ticker,
         name: s.name,
-        exchange: exchangeLabel(s.entry.ticker),
+        exchange: exchangeLabel(s.ticker),
         currency:
-          s.entry.market === 'CN' ? 'CNY' : s.entry.market === 'HK' ? 'HKD' : s.entry.market === 'JP' ? 'JPY' : 'USD',
-        sector: s.entry.market,
+          s.market === 'CN' ? 'CNY' : s.market === 'HK' ? 'HKD' : s.market === 'JP' ? 'JPY' : 'USD',
+        sector: s.market,
         valuation: {
-          ticker: s.entry.ticker,
+          ticker: s.ticker,
           per: s.per,
           pbr: s.pbr,
           dividendYield: null,
@@ -368,17 +534,17 @@ export async function runRealScreener(
           week52Low: s.week52Low,
         },
         financial: {
-          ticker: s.entry.ticker,
+          ticker: s.ticker,
           revenue: null, netIncome: null, totalAssets: null, totalEquity: null,
           freeCashFlow: null, roe: null, revenueGrowth: null,
         },
         technical: {
-          ticker: s.entry.ticker,
+          ticker: s.ticker,
           rsi14: s.rsi14, sma50: s.sma50, sma200: s.sma200,
           bollingerUpper: null, bollingerLower: null,
         },
         analyst: {
-          ticker: s.entry.ticker,
+          ticker: s.ticker,
           targetHigh: null, targetMean: null, targetLow: null, rating: null, analystCount: 0,
         },
         score: { total: sc.total, value: sc.value, growth: 0, quality: 0, technical: sc.technical, alpha: sc.momentum },
@@ -387,5 +553,15 @@ export async function runRealScreener(
     })
     .sort((a, b) => b.score.total - a.score.total);
 
-  return { stocks, universeSize: pool.length, fetched: raw.length, sources };
+  return {
+    stocks,
+    stats: {
+      snapshotSize,
+      prefiltered: prefiltered.length,
+      klineFetched: raw.length,
+      klineBudget,
+      fallbackUniverse,
+      sources,
+    },
+  };
 }

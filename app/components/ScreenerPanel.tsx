@@ -64,7 +64,7 @@ export default function ScreenerPanel() {
           <Settings2 className="h-5 w-5" />
           股票筛选
           <Badge variant="secondary" className="ml-auto font-normal text-xs">
-            真实行情
+            全市场 · 真实行情
           </Badge>
         </CardTitle>
       </CardHeader>
@@ -252,9 +252,14 @@ export default function ScreenerPanel() {
         {error && <p className="text-sm text-red-500">筛选出错：{error}</p>}
         {screenerMeta && !isLoading && (
           <p className="text-xs text-muted-foreground">
-            扫描 {screenerMeta.universeSize} 只标的，成功获取 {screenerMeta.fetched} 只
+            全市场扫描 {screenerMeta.snapshotSize.toLocaleString()} 只 → 条件预筛{" "}
+            {screenerMeta.prefiltered.toLocaleString()} 只 → 深度分析 {screenerMeta.klineFetched} 只
+            （预算 {screenerMeta.klineBudget}，按市值优先）
+            {screenerMeta.fallbackUniverse && "；部分市场快照不可用已回退精选池"}
             {Object.keys(screenerMeta.sources).length > 0 &&
-              `（${Object.entries(screenerMeta.sources).map(([k, v]) => `${k} ${v}`).join(" / ")}）`}
+              `｜数据源：${Object.entries(screenerMeta.sources)
+                .map(([k, v]) => `${k} ${v}`)
+                .join(" / ")}`}
           </p>
         )}
       </CardContent>

@@ -3,7 +3,14 @@ import { ScreenerCriteria, ScreenerResult, ScreenerEngine } from '@/app/types/st
 
 interface StockState {
   screenerResult: ScreenerResult | null;
-  screenerMeta: { universeSize: number; fetched: number; sources: Record<string, number> } | null;
+  screenerMeta: {
+    snapshotSize: number;
+    prefiltered: number;
+    klineFetched: number;
+    klineBudget: number;
+    fallbackUniverse: boolean;
+    sources: Record<string, number>;
+  } | null;
   selectedEngine: ScreenerEngine;
   customCriteria: ScreenerCriteria;
   isLoading: boolean;
@@ -46,9 +53,12 @@ export const useStockStore = create<StockState>((set, get) => ({
           executedAt: new Date(data.executedAt || Date.now()),
         },
         screenerMeta: {
-          universeSize: data.universeSize ?? 0,
-          fetched: data.fetched ?? 0,
-          sources: data.sources ?? {},
+          snapshotSize: data.stats?.snapshotSize ?? 0,
+          prefiltered: data.stats?.prefiltered ?? 0,
+          klineFetched: data.stats?.klineFetched ?? 0,
+          klineBudget: data.stats?.klineBudget ?? 0,
+          fallbackUniverse: data.stats?.fallbackUniverse ?? false,
+          sources: data.stats?.sources ?? {},
         },
         isLoading: false,
       });

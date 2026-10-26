@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { runRealScreener, RealCriteria } from '@/app/lib/realScreener';
+import { runRealScreener } from '@/app/lib/realScreener';
 import { cached } from '@/app/lib/apiCache';
 import { ScreenerEngine } from '@/app/types/stock';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 const ENGINES: ScreenerEngine[] = ['value', 'pullback', 'alpha', 'custom'];
 
@@ -11,8 +12,9 @@ export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const engineParam = sp.get('engine') as ScreenerEngine | null;
   const engine: ScreenerEngine = engineParam && ENGINES.includes(engineParam) ? engineParam : 'value';
+  const klineBudget = Math.min(300, Math.max(30, parseInt(sp.get('budget') || '150', 10) || 150));
 
-  let criteria: RealCriteria = {};
+  let criteria: Record<string, unknown> = {};
   if (engine === 'custom') {
     try {
       criteria = JSON.parse(sp.get('criteria') || '{}');
@@ -21,18 +23,18 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const key = `screener:${engine}:${JSON.stringify(criteria)}`;
+  const key = `screener2:${engine}:${JSON.stringify(criteria)}:${klineBudget}`;
 
   try {
-    const result = await cached(key, 5 * 60 * 1000, () => runRealScreener(engine, criteria));
+    const result = await cached(key, 10 * 60 * 1000, () =>
+      runRealScreener(engine, criteria as any, klineBudget)
+    );
     return NextResponse.json({
       engine,
       criteria,
       stocks: result.stocks,
       totalCount: result.stocks.length,
-      universeSize: result.universeSize,
-      fetched: result.fetched,
-      sources: result.sources,
+      stats: result.stats,
       executedAt: new Date().toISOString(),
     });
   } catch (e) {
