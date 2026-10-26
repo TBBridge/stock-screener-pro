@@ -265,35 +265,43 @@ async function eastmoneyCloses(ticker: string, count = 260): Promise<{ closes: n
   return null;
 }
 
-// Yahoo 日K（最后兜底），带熔断器：连败 5 次暂停 60 秒
+// Yahoo 日K（最后兜底），带重试与熔断器：连败 8 次暂停 45 秒（突发 429 时避免整轮全灭）
 let yahooFails = 0;
 let yahooSkipUntil = 0;
+async function yahooClosesOnce(ticker: string, count: number): Promise<number[] | null> {
+  const res = await fetch(
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1y&includePrePost=false`,
+    {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(8000),
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36' },
+    }
+  );
+  if (!res.ok) throw new Error(String(res.status));
+  const data = await res.json();
+  const result = data?.chart?.result?.[0];
+  const closes = (result?.indicators?.quote?.[0]?.close || []).filter((v: any) => typeof v === 'number');
+  if (closes.length === 0) throw new Error('empty');
+  return closes.slice(-count);
+}
+
 async function yahooCloses(ticker: string, count = 260): Promise<number[] | null> {
   if (Date.now() < yahooSkipUntil) return null;
-  try {
-    const res = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1y&includePrePost=false`,
-      {
-        cache: 'no-store',
-        signal: AbortSignal.timeout(8000),
-        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36' },
-      }
-    );
-    if (!res.ok) throw new Error(String(res.status));
-    const data = await res.json();
-    const result = data?.chart?.result?.[0];
-    const closes = (result?.indicators?.quote?.[0]?.close || []).filter((v: any) => typeof v === 'number');
-    if (closes.length === 0) throw new Error('empty');
-    yahooFails = 0;
-    return closes.slice(-count);
-  } catch {
-    yahooFails++;
-    if (yahooFails >= 5) {
-      yahooSkipUntil = Date.now() + 60 * 1000;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const closes = await yahooClosesOnce(ticker, count);
       yahooFails = 0;
+      return closes;
+    } catch {
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 600));
     }
-    return null;
   }
+  yahooFails++;
+  if (yahooFails >= 8) {
+    yahooSkipUntil = Date.now() + 45 * 1000;
+    yahooFails = 0;
+  }
+  return null;
 }
 
 const closesCache = new Map<string, { closes: number[]; source: string; name?: string; at: number }>();
@@ -499,11 +507,11 @@ export async function runRealScreener(
     }
   }
 
-  // 4) 拉日K计算技术指标（并发 5）
+  // 4) 拉日K计算技术指标（并发 4，降低对 Yahoo/东财的突发压力）
   const sources: Record<string, number> = {};
   const raw: RawStock[] = [];
   let next = 0;
-  const workers = Array.from({ length: 5 }, async () => {
+  const workers = Array.from({ length: 4 }, async () => {
     while (true) {
       const i = next++;
       if (i >= candidates.length) break;
