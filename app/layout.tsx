@@ -1,32 +1,15 @@
 import type { Metadata } from "next";
-import { Noto_Sans, Noto_Sans_JP, Noto_Sans_SC } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
 
-// 英文字体 - 通用
-const notoSans = Noto_Sans({
-  variable: "--font-noto-sans",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-});
-
-// 日文字体
-const notoSansJP = Noto_Sans_JP({
-  variable: "--font-noto-jp",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-});
-
-// 中文字体
-const notoSansSC = Noto_Sans_SC({
-  variable: "--font-noto-sc",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-});
+// 使用系统字体栈，不依赖外网字体服务（构建/运行更稳定，国内访问也更快）
+const systemFontStack =
+  'system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans CJK JP", "Helvetica Neue", Arial, sans-serif';
 
 export const metadata: Metadata = {
-  title: "Stock Screener Pro - AI-Powered Investment Analysis",
-  description: "Advanced stock screening and portfolio management powered by Claude Code Skills",
+  title: "多市场股票分析仪表盘 - A股 · 港股 · 日股 · 美股",
+  description:
+    "A股、港股、日股、美股实时行情、K线图、买卖信号、新闻影响判断、智能筛选与持仓管理",
 };
 
 export default function RootLayout({
@@ -35,11 +18,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body
-        className={`${notoSans.variable} ${notoSansJP.variable} ${notoSansSC.variable} antialiased font-sans`}
-        style={{ fontFamily: 'var(--font-noto-sans), var(--font-noto-sc), var(--font-noto-jp), system-ui, sans-serif' }}
-      >
+    <html lang="zh-CN">
+      <body className="antialiased" style={{ fontFamily: systemFontStack }}>
         {children}
         <Toaster />
       </body>

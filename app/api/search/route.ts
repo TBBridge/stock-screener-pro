@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { searchSymbol } from '@/app/lib/yahooServer';
+import { searchSymbolMulti } from '@/app/lib/yahooServer';
 import { cached } from '@/app/lib/apiCache';
 
 // GET /api/search?q=苹果
@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const results = await cached(`search:${q}`, 10 * 60 * 1000, () => searchSymbol(q.trim()));
+    const results = await cached(`search:${q}`, 10 * 60 * 1000, () => searchSymbolMulti(q.trim()));
     return NextResponse.json({ results });
   } catch (error) {
     return NextResponse.json(

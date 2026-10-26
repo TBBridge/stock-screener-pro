@@ -746,6 +746,61 @@ export async function searchSymbol(query: string): Promise<SearchResult[]> {
   }
 }
 
+// 东方财富模糊搜索（覆盖 A股/港股/美股/日股，支持中文/代码/拼音，Yahoo 不可用时是主力搜索源）
+// QuoteID 映射：1.XX→沪 0.XX→深 116.X→港 105/106.X→美 176.X→日 100.X→全球指数
+function quoteIdToTicker(quoteId: string): string | null {
+  const m = quoteId.match(/^(\d+)\.(.+)$/);
+  if (!m) return null;
+  const [, mkt, code] = m;
+  if (mkt === '1') return `${code}.SS`;
+  if (mkt === '0') return `${code}.SZ`;
+  if (mkt === '116') return `${code}.HK`;
+  if (mkt === '105' || mkt === '106') return code;
+  if (mkt === '176') return `${code}.T`;
+  if (mkt === '100') return `^${code}`;
+  return null;
+}
+
+export async function searchEastmoney(query: string): Promise<SearchResult[]> {
+  try {
+    const url = `https://searchapi.eastmoney.com/api/suggest/get?input=${encodeURIComponent(query)}&type=14&count=10`;
+    const res = await fetchWithTimeout(url, {
+      headers: { Referer: 'https://www.eastmoney.com/' },
+    }, 6000);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const rows = data?.QuotationCodeTable?.Data || [];
+    const out: SearchResult[] = [];
+    for (const r of rows) {
+      const ticker = quoteIdToTicker(r.QuoteID || '');
+      if (!ticker) continue;
+      out.push({
+        ticker,
+        name: r.Name || ticker,
+        exchange: r.SecurityTypeName || '',
+        type: r.Classify || '',
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// 组合搜索：东财（主力）+ Yahoo（补充美股/ETF），去重
+export async function searchSymbolMulti(query: string): Promise<SearchResult[]> {
+  const [em, yahoo] = await Promise.all([searchEastmoney(query), searchSymbol(query)]);
+  const seen = new Set<string>();
+  const merged: SearchResult[] = [];
+  for (const r of [...em, ...yahoo]) {
+    const key = r.ticker.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(r);
+  }
+  return merged;
+}
+
 // ---------------- 新闻 + 影响判断 ----------------
 // 关键词情感规则（中英文）
 const POSITIVE_KEYWORDS: Array<[RegExp, string]> = [
